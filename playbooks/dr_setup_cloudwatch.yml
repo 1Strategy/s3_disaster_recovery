@@ -1,0 +1,196 @@
+---
+###################################################################################################
+#Copyright 2018 Jing Liang
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and limitations under the License.
+####################################################################################################
+
+- hosts: localhost
+  connection: local
+  gather_facts: True
+  vars:
+    # IAM role
+    dr_role_arn: '<IAM role arn>'
+    # source region
+    source_region: 'us-west-2'
+    # destination region
+    dest_region: 'us-east-2'
+    # matching tag for DR enabled bucket in json format. 
+    # NOTE: please keep the extra space in the beginning.
+    match_tagging: ' {"dr": "true"}'
+
+    # lambda function source file name
+    lambda_py_files: 's3_dr_*.py'
+    # zip file names for lambda function creation
+    zip_files: '{{ lambda_py_files }}.zip'
+
+  tasks:
+    - name: Assume an SNS role to create sns topic
+      sts_assume_role:
+        region: 'us-west-2'
+        role_arn: '{{ dr_role_arn }}'
+        role_session_name: "ansible_sandbox"
+      register: assumed_role
+
+    - name: Create SNS topics
+      sns_topic:
+        name: '{{ item.name }}'
+        aws_access_key: '{{ assumed_role.sts_creds.access_key }}'
+        aws_secret_key: '{{ assumed_role.sts_creds.secret_key }}'
+        security_token: '{{ assumed_role.sts_creds.session_token }}'
+        region: '{{ item.target_region }}'
+        state: present
+        display_name: '{{ item.name }}'
+        delivery_policy:
+          http:
+            defaultHealthyRetryPolicy:
+                minDelayTarget: 2
+                maxDelayTarget: 4
+                numRetries: 5
+                numMaxDelayRetries: 5
+                backoffFunction: "linear"
+            disableSubscriptionOverrides: True
+            defaultThrottlePolicy:
+                maxReceivesPerSecond: 10
+      with_items:
+        - name: 's3_source_topic'
+          target_region: '{{ source_region }}'
+        - name: 's3_dest_topic'
+          target_region: '{{ dest_region }}'
+      register: sns_results
+
+    - name: Remove old zip files
+      file:
+        path: ../{{ zip_files }}
+        state: absent
+
+    - name: Create zip packages for lambda functions
+      command: find . -name {{ lambda_py_files }} -exec zip '{}'.zip '{}' \;
+      args:
+        chdir: ../
+
+    - name: create lambda functions
+      lambda:
+        name: '{{ item.name }}'
+        aws_access_key: '{{ assumed_role.sts_creds.access_key }}'
+        aws_secret_key: '{{ assumed_role.sts_creds.secret_key }}'
+        security_token: '{{ assumed_role.sts_creds.session_token }}'
+        region: '{{ item.target_region }}'
+        description: '{{ item.description }}'
+        state: present
+        timeout: 60
+        zip_file: '{{ item.zip_file }}'
+        runtime: 'python3.6'
+        role: '{{ dr_role_arn }}'
+        handler: '{{ item.handler }}'
+        environment_variables: '{{ item.env_vars }}'
+      with_items:
+        - name: s3_dr_source_cloudwatch
+          description: 'Lambda function for config rule to check source S3 bucket compliant.'
+          zip_file: ../s3_dr_source_cloudwatch.py.zip
+          handler: 's3_dr_source_cloudwatch.handler'
+          target_region: '{{ source_region }}'
+          env_vars:
+            sns_topic_arn: '{{ sns_results.results[1].sns_arn }}'
+            match_tagging: '{{ match_tagging }}'
+        - name: s3_dr_dest
+          description: 'Lambda function to initialize destination S3 bucket for replication'
+          zip_file: ../s3_dr_dest.py.zip
+          handler: 's3_dr_dest.handler'
+          target_region: '{{ dest_region }}'
+          env_vars:
+            sns_topic_arn: '{{ sns_results.results[0].sns_arn }}'
+        - name: s3_dr_replication
+          description: 'Lambda function to enable replication'
+          zip_file: ../s3_dr_replication.py.zip
+          handler: 's3_dr_replication.handler'
+          target_region: '{{ source_region }}'
+          env_vars:
+            replication_role_arn: '{{ dr_role_arn }}'
+            dest_region: '{{ dest_region }}'
+      register: lambda_results
+
+    - name: Add policy to the lamda functions
+      lambda_policy:
+        state: 'present'
+        function_name: '{{ item.name }}'
+        statement_id: '{{ item.sid }}'
+        action: lambda:InvokeFunction
+        principal: 'sns.amazonaws.com'
+        source_arn: '{{ item.source_arn }}'
+        region: '{{ item.target_region }}'
+      with_items:
+        - name: s3_dr_dest
+          sid: 'sns_topic_policy'
+          source_arn: '{{ sns_results.results[1].sns_arn }}'
+          target_region: '{{ dest_region }}'
+        - name: s3_dr_replication
+          sid: 'sns_topic_policy'
+          source_arn: '{{ sns_results.results[0].sns_arn }}'
+          target_region: '{{ source_region }}'
+
+    - name: Add subscriptions to SNS topics
+      sns_topic:
+        name: '{{ item.name }}'
+        aws_access_key: '{{ assumed_role.sts_creds.access_key }}'
+        aws_secret_key: '{{ assumed_role.sts_creds.secret_key }}'
+        security_token: '{{ assumed_role.sts_creds.session_token }}'
+        region: '{{ item.target_region }}'
+        state: present
+        subscriptions:
+          - endpoint: '{{ item.endpoint }}'
+            protocol: "lambda"
+      with_items:
+        - name: 's3_source_topic'
+          target_region: '{{ source_region }}'
+          endpoint: "{{ lambda_results.results[2].configuration.function_arn | regex_replace(':'+lambda_results.results[2].configuration.version+'$') }}"
+        - name: 's3_dest_topic'
+          target_region: '{{ dest_region }}'
+          endpoint: "{{ lambda_results.results[1].configuration.function_arn | regex_replace(':'+lambda_results.results[1].configuration.version+'$') }}"
+
+    - name: Create CloudWatch event rule for S3 PutBucketTagging and DeleteBucketReplication
+      cloudwatchevent_rule:
+        name: '{{ item.name }}'
+        description: '{{ item.description }}'
+        aws_access_key: '{{ assumed_role.sts_creds.access_key }}'
+        aws_secret_key: '{{ assumed_role.sts_creds.secret_key }}'
+        security_token: '{{ assumed_role.sts_creds.session_token }}'
+        region: '{{ item.target_region }}'
+        state: 'present'
+        role_arn: '{{ dr_role_arn }}'
+        event_pattern: '{{ item.event_pattern }}'
+        targets: '{{ item.targets }}'
+      with_items:
+        - name: s3_bucket_dr
+          description: 'Event rule for for S3 PutBucketTagging and DeleteBucketReplication events.'
+          target_region: '{{ source_region }}'
+          event_pattern: ' {"source": ["aws.s3"],"detail-type": ["AWS API Call via CloudTrail"],"detail": {"eventSource": ["s3.amazonaws.com"],"eventName": ["DeleteBucketReplication","PutBucketTagging"]}}'
+          targets:
+            - id: s3_dr_source_cloudwatch
+              arn: "{{ lambda_results.results[0].configuration.function_arn | regex_replace(':'+lambda_results.results[0].configuration.version+'$') }}"
+      register: cloudwatch_event_rules
+
+    - name: Add policy to the lamda function for cloudwatch event rule.
+      lambda_policy:
+        state: 'present'
+        function_name: '{{ item.name }}'
+        statement_id: '{{ item.sid }}'
+        action: lambda:InvokeFunction
+        principal: 'events.amazonaws.com'
+        source_arn: '{{ item.source_arn }}'
+        region: '{{ item.target_region }}'
+      with_items:
+        - name: s3_dr_source_cloudwatch
+          sid: 'AWSEvents_s3_bucket_dr'
+          source_arn: "{{ cloudwatch_event_rules.results[0].rule.arn }}"
+          target_region: '{{ source_region }}'
+...
