@@ -20,15 +20,15 @@ Here is an overview of how the solution works:
 
 > Note: When you create a bucket with tags, both `CreateBucket` and `PutBucketTagging` events are triggered, so you only need to fire the Lambda function on `PutBucketTagging`.
 
-1. The CloudWatch rule will trigger the `source_bucket_check` Lambda function which enables [S3 versioning](http://docs.aws.amazon.com/AmazonS3/latest/dev/Versioning.html) on the source bucket.
+2. The CloudWatch rule will trigger the `source_bucket_check` Lambda function which enables [S3 versioning](http://docs.aws.amazon.com/AmazonS3/latest/dev/Versioning.html) on the source bucket.
 
-1. After enabling source bucket versioning, the `source_bucket_check` function sends the source bucket name in a JSON message to the `sns_topic_01` SNS topic in the destination region.
+3. After enabling source bucket versioning, the `source_bucket_check` function sends the source bucket name in a JSON message to the `sns_topic_01` SNS topic in the destination region.
 
-1. The Lambda function (called `destination_bucket_check`) which subscribed to topic sns_topic_01 will be triggered, and it will create the destination bucket in the DR region and enable versioning.
+4. The Lambda function (called `destination_bucket_check`) which subscribed to topic sns_topic_01 will be triggered, and it will create the destination bucket in the DR region and enable versioning.
 
-1. Function `destination_bucket_check` sends a message to another SNS topic (called sns_topic_02) which is defined in the source region with source bucket name info.
+5. Function `destination_bucket_check` sends a message to another SNS topic (called sns_topic_02) which is defined in the source region with source bucket name info.
 
-1. The Lambda function (called `enable_replication`) which subscribed to topic `sns_topic_02` will be triggered, and it will enable cross-region replication on the source bucket.
+6. The Lambda function (called `enable_replication`) which subscribed to topic `sns_topic_02` will be triggered, and it will enable cross-region replication on the source bucket.
 
 All these AWS resources are deployed using the included Ansible Playbook.
 
@@ -46,22 +46,22 @@ Here are the steps to get the solution up and running so you can see the result 
 * Botocore 1.8.1+
 * AWS CLI
 
-1. Create an IAM Role with following permissions, and make sure you have the permissions to assume this Role.
+2. Create an IAM Role with following permissions, and make sure you have the permissions to assume this Role.
 
 * CloudWatch Full Access
 * Lambda Full Access
 * SNS Full Access
 * S3 Full Access
 
-1. Add below trusted entities to the role, so these services can operate on your behalf:
+3. Add below trusted entities to the role, so these services can operate on your behalf:
 
 * The identity provider(s) s3.amazonaws.com
 * The identity provider(s) events.amazonaws.com
 * The identity provider(s) lambda.amazonaws.com
 
-1. Clone this repository to your local machine.
+4. Clone [this repository](https://github.com/1Strategy/s3_disaster_recovery) to your local machine.
 
-1. Update the the variables in Ansible playbook `./playbooks/dr_setup_cloudwatch.yml`
+5. Update the the variables in Ansible playbook `./playbooks/dr_setup_cloudwatch.yml`
 
 ```yaml
   vars:
@@ -76,14 +76,14 @@ Here are the steps to get the solution up and running so you can see the result 
     match_tagging: ' {"dr": "true"}'
 ```
 
-1. Run the Ansible playbook
+6. Run the Ansible playbook
 
 ```bash
 cd playbooks
 ansible-playbook dr_setup_cloudwatch.yml -vvv
 ```
 
-1. Test the solution by creating a new bucket (e.g dr-test-bucket) with tag "dr: true" in your source region. In a few seconds, the `dr-test-bucket-dr` should be created automatically in the destination region and replication should be set up between the source bucket (dr-test-bucket) and the target bucket (dr-test-bucket-dr). Add some objects to the source bucket and check the destination bucket in a few seconds to make sure they replicated successfully.
+7. Test the solution by creating a new bucket (e.g dr-test-bucket) with tag "dr: true" in your source region. In a few seconds, the `dr-test-bucket-dr` should be created automatically in the destination region and replication should be set up between the source bucket (dr-test-bucket) and the target bucket (dr-test-bucket-dr). Add some objects to the source bucket and check the destination bucket in a few seconds to make sure they replicated successfully.
 
 Great, now you have the solution up and running on your environment. Let's see how it works in detail in following sections.
 
@@ -134,11 +134,11 @@ cp s3-dr-replication.zip ..
 Something to keep in mind for the Ansible playbook:
 1. Ansible's AWS support depends on boto3 and AWS CLI
 
-1. Use localhost since we are only using your local machine to send API requests to AWS and all resources will be created on cloud
+2. Use localhost since we are only using your local machine to send API requests to AWS and all resources will be created on cloud
 
-1. Set gather_facts to true, since the playbook needs access to environment variables set in previous section to get your key id and access key.
+3. Set gather_facts to true, since the playbook needs access to environment variables set in previous section to get your key id and access key.
 
-1. Use Ansibles `sts\_assume\_role` module to assume the role created above, and use the session_token from the assumed sts role to perform all other tasks.
+4. Use Ansibles `sts\_assume\_role` module to assume the role created above, and use the session_token from the assumed sts role to perform all other tasks.
 
 ```yaml
   tasks:
@@ -158,9 +158,9 @@ Something to keep in mind for the Ansible playbook:
         ...
 ```
 
-1. Create the 3 lambda functions, then 2 SNS topics and SNS subscriptions, at last create the CloudWatch event rule.
+5. Create the 3 lambda functions, then 2 SNS topics and SNS subscriptions, at last create the CloudWatch event rule.
 
-1. Use the `lambda_policy` module to add policy to each Lambda function to allow SNS and CloudWatch to invoke them.
+6. Use the `lambda_policy` module to add policy to each Lambda function to allow SNS and CloudWatch to invoke them.
 
 ```yaml
       lambda_policy:
